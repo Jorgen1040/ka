@@ -24,11 +24,12 @@ func main() {
 	// Command-line flags
 	signal := flag.String("s", "", "Signal to send (e.g., -s 9 for SIGKILL)")
 	yes := flag.Bool("y", false, "Assume yes; kill all matching processes without confirmation")
+	port := flag.String("p", "", "Port to search for (e.g., -p 3000 for processes listening on port 3000)")
 	flag.Parse()
 
 	// Handle signals like -9
 	args := flag.Args()
-	if len(args) == 0 {
+	if len(args) == 0 && *port == "" {
 		fmt.Println("Usage: ka [options] process_name")
 		flag.PrintDefaults()
 		os.Exit(1)
@@ -49,8 +50,8 @@ func main() {
 		}
 	}
 
-	if processName == "" {
-		log.Fatal("Process name is required")
+	if processName == "" && *port == "" {
+		log.Fatal("Process name or port is required")
 	}
 
 	// Default signal is SIGTERM (15)
@@ -61,33 +62,33 @@ func main() {
 	// Get the current process ID to exclude it later
 	currentPID := os.Getpid()
 
-	// Use pgrep to find matching PIDs
-	pgrepCmd := exec.Command("pgrep", "-f", processName)
-	var pgrepOut bytes.Buffer
-	pgrepCmd.Stdout = &pgrepOut
-	if err := pgrepCmd.Run(); err != nil {
-		fmt.Printf("No processes found matching '%s'\n", processName)
-		os.Exit(0)
-	}
+	// searchTerm is what gets highlighted in the selection list
+	searchTerm := processName
 
-	// Parse PIDs
-	pidStrings := strings.Fields(pgrepOut.String())
 	var pids []int
-	for _, pidStr := range pidStrings {
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
+	if *port != "" {
+		portNum, err := strconv.Atoi(*port)
+		if err != nil || portNum < 1 || portNum > 65535 {
+			log.Fatalf("Invalid port: %s", *port)
 		}
-		// Exclude the current process
-		if pid == currentPID {
-			continue
+		searchTerm = *port
+		pids = findPIDsByPort(*port, currentPID)
+		if len(pids) == 0 {
+			fmt.Printf("No processes found listening on port %s\n", *port)
+			os.Exit(0)
 		}
-		pids = append(pids, pid)
+	} else {
+		pids = findPIDsByName(processName, currentPID)
+		if len(pids) == 0 {
+			fmt.Printf("No processes found matching '%s'\n", processName)
+			os.Exit(0)
+		}
 	}
 
-	if len(pids) == 0 {
-		fmt.Printf("No processes found matching '%s'\n", processName)
-		os.Exit(0)
+	// String form of the PIDs, for passing to ps later
+	pidStrings := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		pidStrings = append(pidStrings, strconv.Itoa(pid))
 	}
 
 	// If -y flag is provided, kill all matching processes without confirmation
@@ -159,13 +160,13 @@ func main() {
 		// Sanitize name and cmdline to remove newlines
 		name = sanitizeString(name)
 		cmdline = sanitizeString(cmdline)
-		optionStr := formatOptionWithHighlight(pid, name, cmdline, width, processName)
+		optionStr := formatOptionWithHighlight(pid, name, cmdline, width, searchTerm)
 		options = append(options, optionStr)
 		pidMap[optionStr] = pid
 	}
 
 	if len(options) == 0 {
-		fmt.Printf("No processes found matching '%s'\n", processName)
+		fmt.Printf("No processes found matching '%s'\n", searchTerm)
 		os.Exit(0)
 	}
 
@@ -194,6 +195,48 @@ func main() {
 	}
 }
 
+// findPIDsByName uses pgrep to find processes whose command line matches name
+func findPIDsByName(name string, excludePID int) []int {
+	pgrepCmd := exec.Command("pgrep", "-f", name)
+	var pgrepOut bytes.Buffer
+	pgrepCmd.Stdout = &pgrepOut
+	if err := pgrepCmd.Run(); err != nil {
+		return nil
+	}
+	return parsePIDs(strings.Fields(pgrepOut.String()), excludePID)
+}
+
+// findPIDsByPort uses lsof to find processes listening on the given port
+func findPIDsByPort(port string, excludePID int) []int {
+	// -sTCP:LISTEN keeps us from killing clients merely connected to the port,
+	// while still reporting UDP sockets bound to it
+	lsofCmd := exec.Command("lsof", "-nP", "-t", "-i:"+port, "-sTCP:LISTEN")
+	var lsofOut bytes.Buffer
+	lsofCmd.Stdout = &lsofOut
+	if err := lsofCmd.Run(); err != nil {
+		return nil
+	}
+	return parsePIDs(strings.Fields(lsofOut.String()), excludePID)
+}
+
+// parsePIDs converts PID strings to ints, dropping duplicates and excludePID
+func parsePIDs(pidStrings []string, excludePID int) []int {
+	seen := make(map[int]bool)
+	var pids []int
+	for _, pidStr := range pidStrings {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		if pid == excludePID || seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
 func formatOptionWithHighlight(pid int, name, cmdline string, width int, processName string) string {
 	pidWidth := 8
 	nameWidth := 25
@@ -217,6 +260,9 @@ func formatOptionWithHighlight(pid int, name, cmdline string, width int, process
 }
 
 func highlightText(text, search string) string {
+	if search == "" {
+		return text
+	}
 	return strings.ReplaceAll(text, search, greenBgWhiteText+search+resetColor)
 }
 

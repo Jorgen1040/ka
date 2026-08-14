@@ -7,6 +7,7 @@ KA (Kill All) is your ultimate sidekick for managing runaway processes on macOS.
 
 ## ✨ Features
 - **Smart Process Killing**: Target processes by name with surgical precision—no stragglers left behind.
+- **Port Hunting**: Find and kill whatever is holding a port hostage with `-p 3000`.
 - **Interactive Interface**: Use a sleek, scrollable, multi-select interface to choose which processes to terminate.
 - **Signal Flexibility**: Supports sending custom signals (default is `SIGTERM`, but feel free to get creative).
 - **Safety First**: No more accidental self-termination; KA excludes itself from the kill list.
@@ -43,6 +44,7 @@ Usage: ka [options] process_name
 Options:
   -s SIGNAL   Signal to send (e.g., -s 9 for SIGKILL)
   -y          Assume yes; kill all matching processes without confirmation
+  -p PORT     Search by port instead of name (e.g., -p 3000)
 ```
 
 ### Examples
@@ -56,7 +58,12 @@ Options:
    ka -s 9 -y chrome
    ```
 
-3. Pretend you're the Terminator and hunt down processes by name. 🌟
+3. Free up whatever is squatting on port `3000`:
+   ```bash
+   ka -p 3000
+   ```
+
+4. Pretend you're the Terminator and hunt down processes by name. 🌟
 
 ## 🔧 Roadmap
 - **Windows Support**: Because macOS users shouldn’t have all the fun.
@@ -77,7 +84,7 @@ Please ensure your code is well-tested (on macOS) and adheres to Go best practic
 
 ## 🚨 Limitations
 - **MacOS Only**: Currently, KA is tested and functional only on macOS. If you're on Windows or Linux, feel free to help us expand compatibility!
-- **Dependencies**: KA relies on `pgrep` and `ps`, which are standard on macOS. If these are missing, things might get wobbly.
+- **Dependencies**: KA relies on `pgrep`, `ps` and (for `-p`) `lsof`, which are standard on macOS. If these are missing, things might get wobbly.
 
 ## 🎉 Credits
 Made with ❤️ by developers who just wanted processes to die properly. Inspired by the chaos of modern macOS development.
