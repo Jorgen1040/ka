@@ -40,6 +40,7 @@ KA (Kill All) is your ultimate sidekick for managing runaway processes on macOS.
 ## 🧑‍💻 Usage
 ```bash
 Usage: ka [options] process_name
+       ka [options] -p port
 
 Options:
   -s SIGNAL   Signal to send (e.g., -s 9 for SIGKILL)

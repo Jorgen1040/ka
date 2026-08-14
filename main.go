@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -25,33 +25,45 @@ func main() {
 	signal := flag.String("s", "", "Signal to send (e.g., -s 9 for SIGKILL)")
 	yes := flag.Bool("y", false, "Assume yes; kill all matching processes without confirmation")
 	port := flag.String("p", "", "Port to search for (e.g., -p 3000 for processes listening on port 3000)")
-	flag.Parse()
 
-	// Handle signals like -9
+	// Pull out bare numeric signals like -9 before flag parsing
+	argv, bareSignal, err := preprocessArgs(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	flag.CommandLine.Parse(argv)
+
+	portSet := flagWasSet(flag.CommandLine, "p")
+	signalSet := flagWasSet(flag.CommandLine, "s")
+	if err := validateSignalForms(bareSignal, signalSet); err != nil {
+		log.Fatal(err)
+	}
+
 	args := flag.Args()
-	if len(args) == 0 && *port == "" {
+	if len(args) == 0 && !portSet {
 		fmt.Println("Usage: ka [options] process_name")
+		fmt.Println("       ka [options] -p port")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	// Extract process name and additional signals
+	// Extract the process name
 	var processName string
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
-			// Handle signals provided without -s flag
-			if num, err := strconv.Atoi(strings.TrimPrefix(arg, "-")); err == nil {
-				*signal = strconv.Itoa(num)
-			} else {
-				log.Fatalf("Invalid signal: %s", arg)
-			}
-		} else {
-			processName = arg
+			log.Fatalf("Unexpected argument %s: flags must come before the process name", arg)
 		}
+		processName = arg
 	}
 
-	if processName == "" && *port == "" {
+	if processName != "" && portSet {
+		log.Fatal("Cannot combine -p with a process name")
+	}
+	if processName == "" && !portSet {
 		log.Fatal("Process name or port is required")
+	}
+	if bareSignal != "" {
+		*signal = bareSignal
 	}
 
 	// Default signal is SIGTERM (15)
@@ -66,11 +78,13 @@ func main() {
 	searchTerm := processName
 
 	var pids []int
-	if *port != "" {
+	if portSet {
 		portNum, err := strconv.Atoi(*port)
 		if err != nil || portNum < 1 || portNum > 65535 {
 			log.Fatalf("Invalid port: %s", *port)
 		}
+		// Normalize forms like "+3000" that Atoi accepts but lsof rejects
+		*port = strconv.Itoa(portNum)
 		searchTerm = *port
 		pids = findPIDsByPort(*port, currentPID)
 		if len(pids) == 0 {
@@ -125,10 +139,7 @@ func main() {
 	}
 
 	// Adjust PageSize to use full terminal height before scrolling
-	pageSize := height - 4 // Subtract for prompt and padding
-	if pageSize < 1 {
-		pageSize = 1
-	}
+	pageSize := max(height-4, 1) // Subtract for prompt and padding
 
 	// Prepare options for interactive selection
 	pidMap := make(map[string]int)
@@ -136,14 +147,9 @@ func main() {
 
 	// Use ps to get command lines for the PIDs
 	psArgs := append([]string{"-o", "pid=,comm=,args=", "-p"}, pidStrings...)
-	psCmd := exec.Command("ps", psArgs...)
-	var psOut bytes.Buffer
-	psCmd.Stdout = &psOut
-	if err := psCmd.Run(); err != nil {
-		log.Fatalf("Failed to get process information: %v", err)
-	}
+	psOut := commandOutput("ps", psArgs...)
 
-	scanner := bufio.NewScanner(&psOut)
+	scanner := bufio.NewScanner(strings.NewReader(psOut))
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
@@ -166,7 +172,11 @@ func main() {
 	}
 
 	if len(options) == 0 {
-		fmt.Printf("No processes found matching '%s'\n", searchTerm)
+		if portSet {
+			fmt.Printf("No processes found listening on port %s\n", *port)
+		} else {
+			fmt.Printf("No processes found matching '%s'\n", processName)
+		}
 		os.Exit(0)
 	}
 
@@ -195,28 +205,91 @@ func main() {
 	}
 }
 
-// findPIDsByName uses pgrep to find processes whose command line matches name
-func findPIDsByName(name string, excludePID int) []int {
-	pgrepCmd := exec.Command("pgrep", "-f", name)
-	var pgrepOut bytes.Buffer
-	pgrepCmd.Stdout = &pgrepOut
-	if err := pgrepCmd.Run(); err != nil {
-		return nil
+func preprocessArgs(args []string) ([]string, string, error) {
+	argv := make([]string, 0, len(args))
+	bareSignal := ""
+	optionsEnded := false
+
+	for _, arg := range args {
+		if arg == "--" {
+			optionsEnded = true
+			argv = append(argv, arg)
+			continue
+		}
+		if !optionsEnded {
+			if rest, ok := strings.CutPrefix(arg, "-"); ok {
+				if num, err := strconv.Atoi(rest); err == nil && num > 0 {
+					if bareSignal != "" {
+						return nil, "", errors.New("cannot specify more than one bare signal")
+					}
+					bareSignal = strconv.Itoa(num)
+					continue
+				}
+			}
+		}
+		argv = append(argv, arg)
 	}
-	return parsePIDs(strings.Fields(pgrepOut.String()), excludePID)
+
+	return argv, bareSignal, nil
 }
 
-// findPIDsByPort uses lsof to find processes listening on the given port
-func findPIDsByPort(port string, excludePID int) []int {
-	// -sTCP:LISTEN keeps us from killing clients merely connected to the port,
-	// while still reporting UDP sockets bound to it
-	lsofCmd := exec.Command("lsof", "-nP", "-t", "-i:"+port, "-sTCP:LISTEN")
-	var lsofOut bytes.Buffer
-	lsofCmd.Stdout = &lsofOut
-	if err := lsofCmd.Run(); err != nil {
-		return nil
+func flagWasSet(flagSet *flag.FlagSet, name string) bool {
+	wasSet := false
+	flagSet.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			wasSet = true
+		}
+	})
+	return wasSet
+}
+
+func validateSignalForms(bareSignal string, signalSet bool) error {
+	if bareSignal != "" && signalSet {
+		return errors.New("cannot combine a bare signal with -s")
 	}
-	return parsePIDs(strings.Fields(lsofOut.String()), excludePID)
+	return nil
+}
+
+// findPIDsByName uses pgrep to find processes whose command line matches name
+func findPIDsByName(name string, excludePID int) []int {
+	return parsePIDs(strings.Fields(commandOutput("pgrep", "-f", name)), excludePID)
+}
+
+// findPIDsByPort uses lsof to find TCP listeners and UDP sockets on the port
+func findPIDsByPort(port string, excludePID int) []int {
+	pidStrings := strings.Fields(commandOutput("lsof", "-nP", "-w", "-t", "-iTCP:"+port, "-sTCP:LISTEN"))
+
+	// lsof also matches sockets connected to the port, so keep only local binds
+	curPID := ""
+	for _, line := range strings.Split(commandOutput("lsof", "-nP", "-w", "-Fpn", "-iUDP:"+port), "\n") {
+		if rest, ok := strings.CutPrefix(line, "p"); ok {
+			curPID = rest
+			continue
+		}
+		if addr, ok := strings.CutPrefix(line, "n"); ok {
+			localAddr, _, _ := strings.Cut(addr, "->")
+			if strings.HasSuffix(localAddr, ":"+port) {
+				pidStrings = append(pidStrings, curPID)
+			}
+		}
+	}
+	return parsePIDs(pidStrings, excludePID)
+}
+
+// commandOutput runs a command and returns its stdout; a silent non-zero exit
+// means "no matches"
+func commandOutput(name string, args ...string) string {
+	out, err := exec.Command(name, args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			log.Fatalf("Failed to run %s: %v", name, err)
+		}
+		if len(exitErr.Stderr) > 0 {
+			log.Fatalf("%s: %s", name, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+	}
+	return string(out)
 }
 
 // parsePIDs converts PID strings to ints, dropping duplicates and excludePID
@@ -240,10 +313,7 @@ func parsePIDs(pidStrings []string, excludePID int) []int {
 func formatOptionWithHighlight(pid int, name, cmdline string, width int, processName string) string {
 	pidWidth := 8
 	nameWidth := 25
-	cmdWidth := width - pidWidth - nameWidth - 11
-	if cmdWidth < 10 {
-		cmdWidth = 10
-	}
+	cmdWidth := max(width-pidWidth-nameWidth-11, 10)
 
 	name = truncateString(name, nameWidth)
 	cmdline = truncateString(cmdline, cmdWidth)
